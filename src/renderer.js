@@ -25,9 +25,16 @@ const countdown       = document.getElementById('countdown');
 // Settings panel
 const settingsPanel   = document.getElementById('settings-panel');
 const setApiUrl       = document.getElementById('set-api-url');
+const setAutoSync     = document.getElementById('set-auto-sync');
 const setInterval_    = document.getElementById('set-interval');
 const setUsername     = document.getElementById('set-username');
 const setPassword     = document.getElementById('set-password');
+const setSqlHost      = document.getElementById('set-sql-host');
+const setSqlPort      = document.getElementById('set-sql-port');
+const setSqlDb        = document.getElementById('set-sql-db');
+const setSqlUser      = document.getElementById('set-sql-user');
+const setSqlPass      = document.getElementById('set-sql-pass');
+const setSqlWinauth   = document.getElementById('set-sql-winauth');
 const btnSaveSettings = document.getElementById('btn-save-settings');
 const btnCancelSettings = document.getElementById('btn-cancel-settings');
 const settingsMsg     = document.getElementById('settings-msg');
@@ -44,6 +51,7 @@ const logBody        = document.getElementById('log-body');
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let syncIntervalMinutes = 5;
+let autoSyncEnabled = false;
 let nextSyncAt = null;
 let countdownTimer = null;
 let totalTables = 0;
@@ -87,7 +95,7 @@ function clearLog() {
   logBody.innerHTML = '';
 }
 
-function addLogRow(table, rows, ms, isError, errMsg) {
+function addLogRow(table, rows, ms, isError, errMsg, skipMsg = null) {
   const tr = document.createElement('tr');
   if (isError) tr.classList.add('row-error');
 
@@ -97,15 +105,17 @@ function addLogRow(table, rows, ms, isError, errMsg) {
 
   const tdRows = document.createElement('td');
   tdRows.className = 'td-rows';
-  tdRows.textContent = isError ? '—' : rows.toLocaleString();
+  tdRows.textContent = (isError || skipMsg) ? '—' : rows.toLocaleString();
 
   const tdMs = document.createElement('td');
   tdMs.className = 'td-ms';
-  tdMs.textContent = isError ? '—' : `${ms}ms`;
+  tdMs.textContent = (isError || skipMsg) ? '—' : `${ms}ms`;
 
   const tdStatus = document.createElement('td');
   tdStatus.className = 'td-status';
-  if (isError) {
+  if (skipMsg) {
+    tdStatus.innerHTML = `<span class="badge badge-skip">${skipMsg}</span>`;
+  } else if (isError) {
     tdStatus.innerHTML = `<span class="badge badge-error">✗ ${errMsg}</span>`;
   } else if (rows === 0) {
     tdStatus.innerHTML = `<span class="badge badge-skip">— no changes</span>`;
@@ -122,16 +132,20 @@ window.api.onSyncStatus((payload) => {
   switch (payload.type) {
     case 'sync-start': {
       clearLog();
-      doneCount  = 0;
-      errorCount = 0;
-      totalTables = 0;
+      doneCount   = 0;
+      errorCount  = 0;
+      totalTables = payload.total ?? 0;
       syncSummary.hidden = false;
       sumDone.textContent  = '0';
-      sumTotal.textContent = '…';
+      sumTotal.textContent = totalTables || '…';
       progressFill.style.width = '0%';
       sumErrors.textContent = '0 errors';
       setStatus('syncing', 'Syncing…');
       btnSyncNow.disabled = true;
+      break;
+    }
+    case 'table-skip': {
+      addLogRow(payload.table, 0, 0, false, null, 'skipped — unsupported');
       break;
     }
     case 'table-ok': {
@@ -156,8 +170,13 @@ window.api.onSyncStatus((payload) => {
       setStatus(errorCount > 0 ? 'warn' : 'ok', label);
       statusLast.textContent = `Last sync: ${new Date(payload.time).toLocaleTimeString()}`;
       btnSyncNow.disabled = false;
-      nextSyncAt = Date.now() + syncIntervalMinutes * 60 * 1000;
-      startCountdown();
+      if (autoSyncEnabled) {
+        nextSyncAt = Date.now() + syncIntervalMinutes * 60 * 1000;
+        startCountdown();
+      } else {
+        if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+        statusNext.hidden = true;
+      }
       break;
     }
     case 'error': {
@@ -184,10 +203,13 @@ btnLogin.addEventListener('click', async () => {
   loginError.hidden   = true;
 
   try {
+    console.log('[login] sending request to', apiUrl);
     await window.api.login({ apiUrl, username, password });
+    console.log('[login] success — switching to dashboard');
     showDashboard();
   } catch (err) {
-    showLoginError(err.message);
+    console.error('[login] error', err);
+    showLoginError(err.message ?? String(err));
   } finally {
     btnLogin.disabled    = false;
     btnLogin.textContent = 'Login';
@@ -221,14 +243,26 @@ btnCancelSettings.addEventListener('click', () => {
 btnSaveSettings.addEventListener('click', async () => {
   const data = {
     apiUrl:              setApiUrl.value.trim().replace(/\/$/, ''),
+    autoSync:            setAutoSync.checked,
     syncIntervalMinutes: parseInt(setInterval_.value, 10) || 5,
     username:            setUsername.value.trim(),
+    sqlHost:             setSqlHost.value.trim()  || 'localhost',
+    sqlPort:             parseInt(setSqlPort.value, 10) || 1433,
+    sqlDatabase:         setSqlDb.value.trim()   || 'dsnpharma',
+    sqlUsername:         setSqlUser.value.trim(),
+    sqlWindowsAuth:      setSqlWinauth.checked,
   };
-  if (setPassword.value) data.password = setPassword.value;
+  if (setPassword.value) data.password    = setPassword.value;
+  if (setSqlPass.value)  data.sqlPassword = setSqlPass.value;
 
   try {
     await window.api.saveConfig(data);
+    autoSyncEnabled     = data.autoSync;
     syncIntervalMinutes = data.syncIntervalMinutes;
+    if (!autoSyncEnabled) {
+      if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+      statusNext.hidden = true;
+    }
     settingsMsg.textContent = 'Saved.';
     settingsMsg.style.color = '#4caf50';
     setTimeout(() => { settingsMsg.textContent = ''; settingsPanel.hidden = true; }, 1500);
@@ -242,10 +276,21 @@ btnSaveSettings.addEventListener('click', async () => {
 async function loadConfig() {
   try {
     const cfg = await window.api.getConfig();
-    setApiUrl.value   = cfg.apiUrl   ?? '';
-    setInterval_.value = cfg.syncIntervalMinutes ?? 5;
-    setUsername.value = cfg.username ?? '';
-    syncIntervalMinutes = cfg.syncIntervalMinutes ?? 5;
+    setApiUrl.value       = cfg.apiUrl             ?? '';
+    setAutoSync.checked   = cfg.autoSync            ?? false;
+    setInterval_.value    = cfg.syncIntervalMinutes ?? 5;
+    setUsername.value     = cfg.username            ?? '';
+    setSqlHost.value      = cfg.sqlHost             ?? 'localhost';
+    setSqlPort.value      = cfg.sqlPort             ?? 1433;
+    setSqlDb.value        = cfg.sqlDatabase         ?? 'dsnpharma';
+    setSqlUser.value      = cfg.sqlUsername         ?? '';
+    setSqlWinauth.checked = cfg.sqlWindowsAuth      ?? false;
+    autoSyncEnabled       = cfg.autoSync            ?? false;
+    syncIntervalMinutes   = cfg.syncIntervalMinutes ?? 5;
+    if (!autoSyncEnabled) {
+      if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+      statusNext.hidden = true;
+    }
   } catch { /* ignore */ }
 }
 

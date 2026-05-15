@@ -1,4 +1,5 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
+[hidden] { display: none !important; }
 
 :root {
   --bg: #0f0f1a;
@@ -191,6 +192,7 @@ header {
 }
 
 .settings-grid label { font-size: 11px; color: var(--text-muted); }
+.settings-section-label { grid-column: 1 / -1; font-size: 11px; font-weight: 600; color: var(--text); text-transform: uppercase; letter-spacing: .05em; padding-top: 10px; border-top: 1px solid var(--border); margin-top: 4px; }
 .settings-actions { display: flex; gap: 8px; align-items: center; }
 #settings-msg { font-size: 12px; margin-left: 8px; }
 

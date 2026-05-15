@@ -63,12 +63,28 @@
       <div class="settings-grid">
         <label>API URL</label>
         <input id="set-api-url" type="url" />
+        <label>Enable Auto Sync</label>
+        <input id="set-auto-sync" type="checkbox" style="width:auto;justify-self:start;margin-top:2px" />
         <label>Sync interval (min)</label>
         <input id="set-interval" type="number" min="1" max="60" />
-        <label>Username</label>
+        <label>API Username</label>
         <input id="set-username" type="text" />
-        <label>New password</label>
+        <label>API Password</label>
         <input id="set-password" type="password" placeholder="Leave blank to keep current" />
+
+        <span class="settings-section-label">SQL Server</span><span></span>
+        <label>Host</label>
+        <input id="set-sql-host" type="text" placeholder="localhost" />
+        <label>Port</label>
+        <input id="set-sql-port" type="number" min="1" max="65535" placeholder="1433" />
+        <label>Database</label>
+        <input id="set-sql-db" type="text" placeholder="dsnpharma" />
+        <label>SQL Username</label>
+        <input id="set-sql-user" type="text" placeholder="autocount_sync" />
+        <label>SQL Password</label>
+        <input id="set-sql-pass" type="password" placeholder="Leave blank to keep current" />
+        <label>Windows Auth</label>
+        <input id="set-sql-winauth" type="checkbox" style="width:auto;justify-self:start;margin-top:2px" />
       </div>
       <div class="settings-actions">
         <button id="btn-save-settings" class="btn-primary btn-sm">Save</button>
