@@ -1,17 +1,42 @@
 {
   "name": "autocount-reader",
   "version": "1.0.0",
-  "description": "",
+  "description": "AutoCount data reader and sync tool",
   "license": "ISC",
-  "author": "",
+  "author": "DSN Pharma",
   "type": "commonjs",
   "main": "index.js",
   "scripts": {
     "start": "electron .",
+    "package": "electron-builder --win",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "build": {
+    "appId": "com.dsnpharma.autocount-reader",
+    "productName": "AutoCount Reader",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "index.js",
+      "preload.js",
+      "src/**/*",
+      "node_modules/**/*",
+      "!node_modules/.cache/**/*"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
   "devDependencies": {
-    "electron": "^42.1.0"
+    "electron": "^42.1.0",
+    "electron-builder": "^25.1.8"
   },
   "dependencies": {
     "mssql": "^12.5.3"
