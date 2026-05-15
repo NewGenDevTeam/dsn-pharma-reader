@@ -6,29 +6,30 @@ const fs = require('fs');
 const sql = require('mssql');
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
-const CONFIG_PATH     = path.join(__dirname, 'config.json');
-const SYNC_STATE_PATH = path.join(__dirname, 'sync-state.json');
+// Must use app.getPath('userData') so files are writable outside the ASAR
+const getConfigPath     = () => path.join(app.getPath('userData'), 'config.json');
+const getSyncStatePath  = () => path.join(app.getPath('userData'), 'sync-state.json');
 
 // ── Config helpers ────────────────────────────────────────────────────────────
 function loadConfig() {
-  if (!fs.existsSync(CONFIG_PATH)) return {};
-  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); }
+  if (!fs.existsSync(getConfigPath())) return {};
+  try { return JSON.parse(fs.readFileSync(getConfigPath(), 'utf-8')); }
   catch { return {}; }
 }
 
 function saveConfig(data) {
   const current = loadConfig();
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify({ ...current, ...data }, null, 2));
+  fs.writeFileSync(getConfigPath(), JSON.stringify({ ...current, ...data }, null, 2));
 }
 
 function loadSyncState() {
-  if (!fs.existsSync(SYNC_STATE_PATH)) return {};
-  try { return JSON.parse(fs.readFileSync(SYNC_STATE_PATH, 'utf-8')); }
+  if (!fs.existsSync(getSyncStatePath())) return {};
+  try { return JSON.parse(fs.readFileSync(getSyncStatePath(), 'utf-8')); }
   catch { return {}; }
 }
 
 function saveSyncState(state) {
-  fs.writeFileSync(SYNC_STATE_PATH, JSON.stringify(state, null, 2));
+  fs.writeFileSync(getSyncStatePath(), JSON.stringify(state, null, 2));
 }
 
 function hasValidToken() {
