@@ -66,7 +66,17 @@ async function withMssql(fn) {
 
 // ── Sync allowlist — only tables listed here will ever call the API ──────────
 // endpoint must match exactly what the middleware has implemented.
-const BATCH_SIZE = 10; // keep small for debugging; raise when backend is stable
+const BATCH_SIZE           = 50;    // rows per POST batch
+const INTER_BATCH_DELAY_MS = 800;   // ms between consecutive batch POSTs to avoid 429
+const FETCH_TIMEOUT_MS     = 60_000; // abort a single fetch after 60 s then retry
+const MAX_RETRIES          = 3;     // attempts per batch before giving up
+const RETRY_DELAY_MS       = 2_000; // ms to wait between retries
+
+// Set to a non-empty list to sync only those tables (for debugging failed tables).
+// Reset to [] when you want to sync all enabled tables again.
+const DEBUG_ONLY_TABLES = [];
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const SYNC_TABLES = [
   { table: 'IV',       endpoint: '/api/sync/IV',       enabled: true },
@@ -161,16 +171,23 @@ async function apiLogin(apiUrl, username, password) {
 }
 
 async function postTableBatch(apiUrl, token, endpoint, rows) {
-  const base = new URL(apiUrl).origin;
-  const res = await fetch(`${base}${endpoint}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
-    body: JSON.stringify({ rows }),
-  });
-  return res;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const base = new URL(apiUrl).origin;
+    const res = await fetch(`${base}${endpoint}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({ rows }),
+      signal: controller.signal,
+    });
+    return res;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ── Sync engine ───────────────────────────────────────────────────────────────
@@ -196,7 +213,9 @@ async function runSync() {
     return;
   }
 
-  const enabledEntries = SYNC_TABLES.filter(e => e.enabled);
+  const enabledEntries = SYNC_TABLES
+    .filter(e => e.enabled)
+    .filter(e => DEBUG_ONLY_TABLES.length === 0 || DEBUG_ONLY_TABLES.includes(e.table));
   const enabledNames   = enabledEntries.map(e => e.table);
 
   isSyncing = true;
@@ -212,9 +231,17 @@ async function runSync() {
   }
 
   const state = loadSyncState();
-  const syncReport = { supported: [], missing: [], tooLarge: [], errors: [] };
+  const syncReport = { supported: [], missing: [], tooLarge: [], rateLimited: [], errors: [] };
+  let rateLimitAborted = false; // set true on first 429 — stops all remaining tables
 
   for (const entry of enabledEntries) {
+    // 429 received on a previous table — mark remaining tables and send no more requests
+    if (rateLimitAborted) {
+      syncReport.rateLimited.push(entry.table);
+      notifyRenderer({ type: 'table-skip', table: entry.table, reason: 'not synced — stopped due to rate limit' });
+      continue;
+    }
+
     const t0 = Date.now();
     try {
       const columns  = colMap[entry.table] || [];
@@ -223,28 +250,62 @@ async function runSync() {
 
       console.log(`[sync] ${entry.table} → ${entry.endpoint} | columns: ${columns.length} | rows fetched: ${rows.length}`);
 
-      let tableOutcome = 'ok'; // 'ok' | '404' | '413'
+      let tableOutcome = 'ok'; // 'ok' | '404' | '413' | '429'
 
       if (rows.length > 0) {
         const totalBatches = Math.ceil(rows.length / BATCH_SIZE);
         for (let b = 0; b < totalBatches; b++) {
-          if (tableOutcome !== 'ok') break; // stop on 404/413 — no point retrying
+          if (tableOutcome !== 'ok') break; // stop immediately on any terminal status
+
+          // Pace requests — wait before every batch to avoid overwhelming the server
+          await sleep(INTER_BATCH_DELAY_MS);
 
           const batch = rows.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
-          console.log(`[sync] ${entry.table} | batch ${b + 1}/${totalBatches} | rows: ${batch.length} | endpoint: ${entry.endpoint}`);
+          console.log(`[sync] ${entry.table} | batch ${b + 1}/${totalBatches} | rows: ${batch.length} | delay: ${INTER_BATCH_DELAY_MS}ms`);
 
-          let res = await postTableBatch(cfg.apiUrl, cfg.token, entry.endpoint, batch);
+          // ── Fetch with retry on network / timeout failures ────────────────
+          let res;
+          let lastFetchErr = null;
+          for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            try {
+              res = await postTableBatch(cfg.apiUrl, cfg.token, entry.endpoint, batch);
 
-          // Token expired — re-login once and retry
-          if (res.status === 401) {
-            const loginData = await apiLogin(cfg.apiUrl, cfg.username, cfg.password);
-            const newExpiry = new Date(Date.now() + loginData.expiresIn * 1000).toISOString();
-            saveConfig({ token: loginData.token, tokenExpiry: newExpiry });
-            cfg.token = loginData.token;
-            res = await postTableBatch(cfg.apiUrl, cfg.token, entry.endpoint, batch);
+              // Token expired — re-login once inside this attempt
+              if (res.status === 401) {
+                const loginData = await apiLogin(cfg.apiUrl, cfg.username, cfg.password);
+                const newExpiry = new Date(Date.now() + loginData.expiresIn * 1000).toISOString();
+                saveConfig({ token: loginData.token, tokenExpiry: newExpiry });
+                cfg.token = loginData.token;
+                res = await postTableBatch(cfg.apiUrl, cfg.token, entry.endpoint, batch);
+              }
+
+              lastFetchErr = null;
+              break; // resolved — exit retry loop
+            } catch (fetchErr) {
+              lastFetchErr = fetchErr;
+              const kind = fetchErr.name === 'AbortError' ? 'TIMEOUT (60s)' : 'FETCH ERROR';
+              console.error(
+                `[sync] ${entry.table} | batch ${b + 1}/${totalBatches}` +
+                ` | attempt ${attempt}/${MAX_RETRIES} | ${kind}` +
+                ` | ${fetchErr.name}: ${fetchErr.message}` +
+                ` | endpoint: ${entry.endpoint}`
+              );
+              if (attempt < MAX_RETRIES) {
+                console.log(`[sync] ${entry.table} | batch ${b + 1}/${totalBatches} | retry in ${RETRY_DELAY_MS}ms…`);
+                await sleep(RETRY_DELAY_MS);
+              }
+            }
           }
 
-          // Read body once for logging — after 401 retry is resolved
+          if (lastFetchErr) {
+            throw new Error(
+              `batch ${b + 1}/${totalBatches} [${entry.endpoint}]` +
+              ` fetch failed after ${MAX_RETRIES} attempts` +
+              ` — ${lastFetchErr.name}: ${lastFetchErr.message}`
+            );
+          }
+
+          // Read body once for logging
           const resBody = await res.text();
           console.log(`[sync] ${entry.table} | batch ${b + 1}/${totalBatches} | status: ${res.status} | msg: ${resBody.slice(0, 200)}`);
 
@@ -252,6 +313,8 @@ async function runSync() {
             tableOutcome = '404'; // backend route not implemented — no retry
           } else if (res.status === 413) {
             tableOutcome = '413'; // payload too large — no retry
+          } else if (res.status === 429) {
+            tableOutcome = '429'; // rate limited — abort entire sync
           } else if (!res.ok) {
             throw new Error(`batch ${b + 1}/${totalBatches}: HTTP ${res.status}: ${resBody.slice(0, 200)}`);
           }
@@ -264,6 +327,11 @@ async function runSync() {
       } else if (tableOutcome === '413') {
         syncReport.tooLarge.push(entry.table);
         notifyRenderer({ type: 'table-skip', table: entry.table, reason: 'payload too large — raise server body limit' });
+      } else if (tableOutcome === '429') {
+        rateLimitAborted = true;
+        syncReport.rateLimited.push(entry.table);
+        console.warn(`[sync] 429 on ${entry.table} — aborting entire sync, no more requests will be sent`);
+        notifyRenderer({ type: 'table-skip', table: entry.table, reason: 'rate limited — sync stopped' });
       } else {
         syncReport.supported.push(entry.table);
         state[entry.table] = { lastSync: new Date().toISOString(), rows: rows.length };
@@ -278,10 +346,11 @@ async function runSync() {
 
   // ── Sync summary (terminal + renderer) ────────────────────────────────────
   console.log('\n[sync-summary] ──────────────────────────────────────');
-  console.log(`[sync-summary] Supported  (${syncReport.supported.length}): ${syncReport.supported.join(', ') || 'none'}`);
-  console.log(`[sync-summary] Missing    (${syncReport.missing.length}): ${syncReport.missing.join(', ') || 'none'}`);
-  console.log(`[sync-summary] Too large  (${syncReport.tooLarge.length}): ${syncReport.tooLarge.join(', ') || 'none'}`);
-  console.log(`[sync-summary] Errors     (${syncReport.errors.length}): ${syncReport.errors.join(', ') || 'none'}`);
+  console.log(`[sync-summary] Supported   (${syncReport.supported.length}): ${syncReport.supported.join(', ') || 'none'}`);
+  console.log(`[sync-summary] Missing     (${syncReport.missing.length}): ${syncReport.missing.join(', ') || 'none'}`);
+  console.log(`[sync-summary] Too large   (${syncReport.tooLarge.length}): ${syncReport.tooLarge.join(', ') || 'none'}`);
+  console.log(`[sync-summary] Rate limited(${syncReport.rateLimited.length}): ${syncReport.rateLimited.join(', ') || 'none'}`);
+  console.log(`[sync-summary] Errors      (${syncReport.errors.length}): ${syncReport.errors.join(', ') || 'none'}`);
   if (syncReport.missing.length > 0) {
     console.log(`[sync-summary] Backend must implement:`);
     syncReport.missing.forEach(t => console.log(`  POST /api/sync/${t}   (accepts { rows:[...] }, returns { upserted: N })`));

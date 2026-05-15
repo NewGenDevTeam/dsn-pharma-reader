@@ -145,7 +145,10 @@ window.api.onSyncStatus((payload) => {
       break;
     }
     case 'table-skip': {
-      addLogRow(payload.table, 0, 0, false, null, 'skipped — unsupported');
+      doneCount++;
+      addLogRow(payload.table, 0, 0, false, null, payload.reason ?? 'skipped — unsupported');
+      sumDone.textContent = doneCount;
+      if (totalTables > 0) progressFill.style.width = `${(doneCount / totalTables) * 100}%`;
       break;
     }
     case 'table-ok': {
