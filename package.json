@@ -1,0 +1,19 @@
+{
+  "name": "autocount-reader",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "devDependencies": {
+    "electron": "^42.1.0"
+  },
+  "dependencies": {
+    "mssql": "^12.5.3"
+  }
+}

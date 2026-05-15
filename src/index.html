@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'" />
+  <title>AutoCount Sync</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ── LOGIN VIEW ─────────────────────────────────────────────────────── -->
+  <div id="view-login" class="view">
+    <div class="login-card">
+      <div class="login-logo">
+        <div class="logo-circle">AC</div>
+        <h1>AutoCount Sync</h1>
+        <p class="subtitle">DSN PHARMA SDN. BHD.</p>
+      </div>
+      <div class="form-group">
+        <label>API Server URL</label>
+        <input id="inp-api-url" type="url" placeholder="https://yourserver.com" />
+      </div>
+      <div class="form-group">
+        <label>Username</label>
+        <input id="inp-username" type="text" placeholder="admin" autocomplete="username" />
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input id="inp-password" type="password" placeholder="••••••••" autocomplete="current-password" />
+      </div>
+      <button id="btn-login" class="btn-primary">Login</button>
+      <div id="login-error" class="error-msg" hidden></div>
+    </div>
+  </div>
+
+  <!-- ── DASHBOARD VIEW ─────────────────────────────────────────────────── -->
+  <div id="view-dashboard" class="view" hidden>
+
+    <!-- Header -->
+    <header>
+      <div class="header-left">
+        <span class="header-title">AutoCount Sync</span>
+        <span class="header-company">DSN PHARMA SDN. BHD.</span>
+      </div>
+      <div class="header-right">
+        <button id="btn-sync-now" class="btn-primary btn-sm">Sync Now</button>
+        <button id="btn-settings" class="btn-ghost btn-sm">⚙ Settings</button>
+      </div>
+    </header>
+
+    <!-- Status bar -->
+    <div id="status-bar">
+      <span id="status-indicator" class="indicator idle"></span>
+      <span id="status-text">Idle</span>
+      <span class="spacer"></span>
+      <span id="status-last">Last sync: —</span>
+      <span id="status-next" hidden>· Next in: <span id="countdown"></span></span>
+    </div>
+
+    <!-- Settings panel (hidden by default) -->
+    <div id="settings-panel" hidden>
+      <div class="settings-grid">
+        <label>API URL</label>
+        <input id="set-api-url" type="url" />
+        <label>Sync interval (min)</label>
+        <input id="set-interval" type="number" min="1" max="60" />
+        <label>Username</label>
+        <input id="set-username" type="text" />
+        <label>New password</label>
+        <input id="set-password" type="password" placeholder="Leave blank to keep current" />
+      </div>
+      <div class="settings-actions">
+        <button id="btn-save-settings" class="btn-primary btn-sm">Save</button>
+        <button id="btn-cancel-settings" class="btn-ghost btn-sm">Cancel</button>
+        <span id="settings-msg"></span>
+      </div>
+    </div>
+
+    <!-- Progress summary (visible during sync) -->
+    <div id="sync-summary" hidden>
+      <div class="summary-bar">
+        <span id="sum-done">0</span> / <span id="sum-total">0</span> tables
+        &nbsp;·&nbsp;
+        <span id="sum-errors" class="err-count">0 errors</span>
+      </div>
+      <div class="progress-track"><div id="progress-fill"></div></div>
+    </div>
+
+    <!-- Log table -->
+    <div id="log-wrapper">
+      <table id="log-table">
+        <thead>
+          <tr>
+            <th>Table</th>
+            <th>Rows</th>
+            <th>Time</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="log-body"></tbody>
+      </table>
+    </div>
+
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
