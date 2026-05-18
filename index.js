@@ -98,19 +98,30 @@ const DEBUG_ONLY_TABLES = [];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const LOOKBACK_MS = 2 * 60 * 1000; // 2-minute safety lookback to avoid missing records on timestamp boundary
+const MODIFIED_COLUMNS = ['LastModified', 'ModifiedDate', 'ModifiedDateTime', 'Modified'];
+
+function findModifiedCol(columns) {
+  for (const candidate of MODIFIED_COLUMNS) {
+    const found = columns.find(c => c.toLowerCase() === candidate.toLowerCase());
+    if (found) return found;
+  }
+  return null;
+}
+
 const SYNC_TABLES = [
   { table: 'IV',       endpoint: '/api/sync/IV',       enabled: true },
-  { table: 'IVDTL',    endpoint: '/api/sync/IVDTL',    enabled: true },
+  { table: 'IVDTL',   endpoint: '/api/sync/IVDTL',    enabled: true, parentTable: 'IV', parentFk: 'IVID'   },
   { table: 'QT',       endpoint: '/api/sync/QT',       enabled: true },
-  { table: 'QTDTL',    endpoint: '/api/sync/QTDTL',    enabled: true },
+  { table: 'QTDTL',   endpoint: '/api/sync/QTDTL',    enabled: true, parentTable: 'QT', parentFk: 'QTID'   },
   { table: 'SO',       endpoint: '/api/sync/SO',       enabled: true },
-  { table: 'SODTL',    endpoint: '/api/sync/SODTL',    enabled: true },
+  { table: 'SODTL',   endpoint: '/api/sync/SODTL',    enabled: true, parentTable: 'SO', parentFk: 'SOID'   },
   { table: 'DO',       endpoint: '/api/sync/DO',       enabled: true },
-  { table: 'DODTL',    endpoint: '/api/sync/DODTL',    enabled: true },
+  { table: 'DODTL',   endpoint: '/api/sync/DODTL',    enabled: true, parentTable: 'DO', parentFk: 'DOID'   },
   { table: 'CN',       endpoint: '/api/sync/CN',       enabled: true },
-  { table: 'CNDTL',    endpoint: '/api/sync/CNDTL',    enabled: true },
+  { table: 'CNDTL',   endpoint: '/api/sync/CNDTL',    enabled: true, parentTable: 'CN', parentFk: 'CNID'   },
   { table: 'PO',       endpoint: '/api/sync/PO',       enabled: true },
-  { table: 'PODTL',    endpoint: '/api/sync/PODTL',    enabled: true },
+  { table: 'PODTL',   endpoint: '/api/sync/PODTL',    enabled: true, parentTable: 'PO', parentFk: 'POID'   },
   { table: 'Debtor',   endpoint: '/api/sync/Debtor',   enabled: true },
   { table: 'Creditor', endpoint: '/api/sync/Creditor', enabled: true },
   { table: 'Item',     endpoint: '/api/sync/Item',     enabled: true },
@@ -144,34 +155,116 @@ async function getColumnInfoForTables(tableNames) {
   });
 }
 
-// ── Fetch rows from a single table ───────────────────────────────────────────
-async function fetchTableRows(tableName, columns, lastSync) {
+// ── Query PRIMARY KEY columns from INFORMATION_SCHEMA ────────────────────────
+async function getPrimaryKeys(tableNames) {
+  if (tableNames.length === 0) return {};
   return withMssql(async (pool) => {
-    const hasLastModified = columns.includes('LastModified');
-    // Use explicit column list (binary types already excluded by getColumnInfoForTables)
-    const colList = columns.length > 0
-      ? columns.map(c => `[${c}]`).join(',')
-      : '*';
-    let query = `SELECT ${colList} FROM [${tableName}]`;
     const req = pool.request();
+    const placeholders = tableNames.map((name, i) => {
+      req.input(`t${i}`, sql.NVarChar, name);
+      return `@t${i}`;
+    }).join(',');
+    const result = await req.query(`
+      SELECT tc.TABLE_NAME, kcu.COLUMN_NAME
+      FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+      JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+        ON  kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+        AND kcu.TABLE_NAME      = tc.TABLE_NAME
+      WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+        AND tc.TABLE_NAME IN (${placeholders})
+      ORDER BY tc.TABLE_NAME, kcu.ORDINAL_POSITION
+    `);
+    const map = {};
+    for (const row of result.recordset) {
+      if (!map[row.TABLE_NAME]) map[row.TABLE_NAME] = [];
+      map[row.TABLE_NAME].push(row.COLUMN_NAME);
+    }
+    return map;
+  });
+}
 
-    if (hasLastModified && lastSync) {
-      query += ` WHERE LastModified > @lastSync`;
-      req.input('lastSync', sql.DateTime2, new Date(lastSync));
+// ── Serialize a SQL recordset row to JSON-safe plain object ──────────────────
+function serializeRows(recordset, columns) {
+  return recordset.map(row => {
+    const out = {};
+    for (const col of columns) {
+      const v = row[col];
+      if (v instanceof Date)       out[col] = v.toISOString();
+      else if (Buffer.isBuffer(v)) out[col] = v.toString('base64');
+      else                         out[col] = v;
+    }
+    return out;
+  });
+}
+
+// ── Fetch rows from a single table ───────────────────────────────────────────
+// parentLink for detail tables: { parentTable, parentPk, childFk, parentModifiedCol }
+//   parentPk:          PK column on the parent header (auto-discovered via INFORMATION_SCHEMA)
+//   childFk:           FK column on this detail table that references parentPk
+//   parentModifiedCol: modification-timestamp column on the parent table
+//
+// Two-step incremental for detail tables (avoids JOIN ambiguity & validates early):
+//   Step 1 — SELECT DISTINCT [parentPk] FROM [parentTable] WHERE [parentModifiedCol] > lastSync
+//   Step 2 — if count = 0 → skip; else SELECT ... WHERE [childFk] IN (changedPks)
+async function fetchTableRows(tableName, columns, lastSync, parentLink) {
+  return withMssql(async (pool) => {
+    const ownModifiedCol = findModifiedCol(columns);
+    const colList = columns.length > 0 ? columns.map(c => `[${c}]`).join(',') : '*';
+
+    // ── PATH 1: table has its own modification-timestamp column ───────────
+    if (ownModifiedCol && lastSync) {
+      const lookbackTime = new Date(new Date(lastSync).getTime() - LOOKBACK_MS);
+      const query = `SELECT ${colList} FROM [${tableName}] WHERE [${ownModifiedCol}] > @lastSync`;
+      console.log(`[sync] ${tableName} | SQL: ${query} | @lastSync=${lookbackTime.toISOString()}`);
+      const req = pool.request();
+      req.input('lastSync', sql.DateTime2, lookbackTime);
+      const result = await req.query(query);
+      return { rows: serializeRows(result.recordset, columns), syncMode: 'incremental', modifiedCol: ownModifiedCol, changedParentCount: null };
     }
 
-    const result = await req.query(query);
-    // Serialize non-JSON-safe types (Date, Buffer)
-    return result.recordset.map(row => {
-      const out = {};
-      for (const col of columns) {
-        const v = row[col];
-        if (v instanceof Date) out[col] = v.toISOString();
-        else if (Buffer.isBuffer(v)) out[col] = v.toString('base64');
-        else out[col] = v;
+    // ── PATH 2: two-step incremental via parent header ────────────────────
+    if (parentLink?.parentPk && parentLink?.childFk && parentLink?.parentModifiedCol && lastSync) {
+      const { parentTable, parentPk, childFk, parentModifiedCol } = parentLink;
+      const lookbackTime = new Date(new Date(lastSync).getTime() - LOOKBACK_MS);
+
+      // Step 1 — get PKs of parent rows changed since lastSync
+      const step1Sql = `SELECT DISTINCT [${parentPk}] FROM [${parentTable}] WHERE [${parentModifiedCol}] > @lastSync`;
+      console.log(`[sync] ${tableName} | step1 (changed parents): ${step1Sql} | @lastSync=${lookbackTime.toISOString()}`);
+      const pkReq = pool.request();
+      pkReq.input('lastSync', sql.DateTime2, lookbackTime);
+      const pkResult = await pkReq.query(step1Sql);
+      const changedPks = pkResult.recordset.map(r => r[parentPk]);
+      console.log(`[sync] ${tableName} | changed ${parentTable}.${parentPk} count: ${changedPks.length}`);
+
+      if (changedPks.length === 0) {
+        // No parent changed → skip the detail table entirely
+        return { rows: [], syncMode: 'incremental-parent', modifiedCol: `${parentTable}.${parentModifiedCol}`, changedParentCount: 0 };
       }
-      return out;
-    });
+
+      // Step 2 — fetch detail rows for the changed parents only
+      let step2Sql;
+      const detailReq = pool.request();
+      if (changedPks.length <= 2000) {
+        changedPks.forEach((pk, i) => detailReq.input(`pk${i}`, pk));
+        const ph = changedPks.map((_, i) => `@pk${i}`).join(',');
+        step2Sql = `SELECT ${colList} FROM [${tableName}] WHERE [${childFk}] IN (${ph})`;
+      } else {
+        // Too many PKs for parameter list — use a correlated subquery instead
+        detailReq.input('lastSync', sql.DateTime2, lookbackTime);
+        step2Sql = `SELECT ${colList} FROM [${tableName}] WHERE [${childFk}] IN`
+          + ` (SELECT [${parentPk}] FROM [${parentTable}] WHERE [${parentModifiedCol}] > @lastSync)`;
+      }
+      console.log(`[sync] ${tableName} | step2 (detail rows): ${step2Sql.slice(0, 300)}`);
+      const detailResult = await detailReq.query(step2Sql);
+      return { rows: serializeRows(detailResult.recordset, columns), syncMode: 'incremental-parent', modifiedCol: `${parentTable}.${parentModifiedCol}`, changedParentCount: changedPks.length };
+    }
+
+    // ── PATH 3: full scan ─────────────────────────────────────────────────
+    const fullQuery = `SELECT ${colList} FROM [${tableName}]`;
+    console.log(`[sync] ${tableName} | SQL (full scan): ${fullQuery}`);
+    const req = pool.request();
+    const result = await req.query(fullQuery);
+    return { rows: serializeRows(result.recordset, columns), syncMode: 'full', modifiedCol: null, changedParentCount: null };
   });
 }
 
@@ -222,7 +315,11 @@ function notifyRenderer(payload) {
 }
 
 async function runSync() {
-  if (isSyncing) return;
+  if (isSyncing) {
+    console.log('[sync] Already running — skipping this trigger');
+    notifyRenderer({ type: 'sync-skip', message: 'Sync already in progress — skipped' });
+    return;
+  }
   const cfg = loadConfig();
   if (!cfg.token || !cfg.apiUrl) {
     notifyRenderer({ type: 'error', message: 'Not configured. Please log in.' });
@@ -239,11 +336,19 @@ async function runSync() {
   const enabledNames   = enabledEntries.map(e => e.table);
 
   isSyncing = true;
+  const syncStartTime = Date.now();
   notifyRenderer({ type: 'sync-start', time: new Date().toISOString(), total: enabledEntries.length });
 
-  let colMap;
+  let colMap, pkMap;
   try {
     colMap = await getColumnInfoForTables(enabledNames);
+    const parentNames = [...new Set(enabledEntries.filter(e => e.parentTable).map(e => e.parentTable))];
+    pkMap = await getPrimaryKeys(parentNames);
+    if (Object.keys(pkMap).length > 0) {
+      console.log('[sync] Discovered PKs via INFORMATION_SCHEMA:', JSON.stringify(pkMap));
+    } else {
+      console.warn('[sync] No PRIMARY KEY constraints found in INFORMATION_SCHEMA — will use hardcoded parentFk hints from SYNC_TABLES');
+    }
   } catch (err) {
     isSyncing = false;
     notifyRenderer({ type: 'error', message: `SQL Server error: ${err.message}` });
@@ -264,12 +369,40 @@ async function runSync() {
 
     const t0 = Date.now();
     try {
-      const columns       = colMap[entry.table] || [];
-      const lastSync      = state[entry.table]?.lastSync ?? null;
-      const fetchStartTime = new Date().toISOString(); // capture before fetch — rows created during post won't be missed
-      const rows          = await fetchTableRows(entry.table, columns, lastSync);
+      const columns        = colMap[entry.table] || [];
+      const lastSync       = state[entry.table]?.lastSync ?? null;
+      // Capture time before the fetch so records created during the POST window aren't missed next run
+      const fetchStartTime = new Date().toISOString();
 
-      console.log(`[sync] ${entry.table} → ${entry.endpoint} | columns: ${columns.length} | rows fetched: ${rows.length}`);
+      // For detail tables: build parentLink with a verified PK and a matching FK column.
+      // parentPk  — discovered from INFORMATION_SCHEMA; falls back to entry.parentFk hint.
+      // childFk   — the column in this detail table that equals parentPk (same name, case-insensitive).
+      let parentLink = null;
+      if (entry.parentTable) {
+        const parentCols        = colMap[entry.parentTable] || [];
+        const parentModifiedCol = findModifiedCol(parentCols);
+        // Use INFORMATION_SCHEMA-discovered PK first; fall back to hardcoded hint
+        const parentPk = pkMap[entry.parentTable]?.[0] ?? entry.parentFk;
+
+        if (parentModifiedCol && parentPk) {
+          // Try the discovered PK name first, then the hardcoded entry.parentFk as a second guess
+          const fkCandidates = [...new Set([parentPk, entry.parentFk].filter(Boolean))];
+          const childFk = fkCandidates
+            .map(c => columns.find(col => col.toLowerCase() === c.toLowerCase()))
+            .find(Boolean);
+
+          if (childFk) {
+            parentLink = { parentTable: entry.parentTable, parentPk, childFk, parentModifiedCol };
+            console.log(`[sync] ${entry.table} | parentLink: ${entry.parentTable}.${parentPk} → ${entry.table}.${childFk} via ${parentModifiedCol}`);
+          } else {
+            console.warn(`[sync] ${entry.table} | FK not found (tried: ${fkCandidates.join(', ')}) — detail table will do full scan`);
+          }
+        }
+      }
+
+      const { rows, syncMode, modifiedCol, changedParentCount } = await fetchTableRows(entry.table, columns, lastSync, parentLink);
+      const parentInfo = changedParentCount !== null ? ` | changed parents: ${changedParentCount}` : '';
+      console.log(`[sync] ${entry.table} | mode: ${syncMode}${modifiedCol ? ` via [${modifiedCol}]` : ''}${parentInfo} | lastSync: ${lastSync ?? 'none'} | rows: ${rows.length}`);
 
       let tableOutcome = 'ok'; // 'ok' | '404' | '413' | '429'
 
@@ -326,9 +459,15 @@ async function runSync() {
             );
           }
 
-          // Read body once for logging
+          // Read body once — parse JSON for insert/update counts if available
           const resBody = await res.text();
-          console.log(`[sync] ${entry.table} | batch ${b + 1}/${totalBatches} | status: ${res.status} | msg: ${resBody.slice(0, 200)}`);
+          let batchStats = {};
+          try { batchStats = JSON.parse(resBody); } catch {}
+          const { inserted = 0, updated = 0, upserted = 0, skipped = 0 } = batchStats;
+          const countStr = upserted > 0
+            ? `upserted: ${upserted}`
+            : `ins: ${inserted} upd: ${updated} skip: ${skipped}`;
+          console.log(`[sync] ${entry.table} | batch ${b + 1}/${totalBatches} | HTTP ${res.status} | ${countStr}`);
 
           if (res.status === 404) {
             tableOutcome = '404'; // backend route not implemented — no retry
@@ -357,7 +496,7 @@ async function runSync() {
         syncReport.supported.push(entry.table);
         state[entry.table] = { lastSync: fetchStartTime, rows: rows.length };
         saveSyncState(state);
-        notifyRenderer({ type: 'table-ok', table: entry.table, count: rows.length, ms: Date.now() - t0 });
+        notifyRenderer({ type: 'table-ok', table: entry.table, count: rows.length, ms: Date.now() - t0, syncMode });
       }
     } catch (err) {
       syncReport.errors.push(entry.table);
@@ -376,10 +515,12 @@ async function runSync() {
     console.log(`[sync-summary] Backend must implement:`);
     syncReport.missing.forEach(t => console.log(`  POST /api/sync/${t}   (accepts { rows:[...] }, returns { upserted: N })`));
   }
+  const syncDurationMs = Date.now() - syncStartTime;
+  console.log(`[sync-summary] Duration:   ${(syncDurationMs / 1000).toFixed(1)}s`);
   console.log('[sync-summary] ──────────────────────────────────────\n');
 
   isSyncing = false;
-  notifyRenderer({ type: 'sync-done', time: new Date().toISOString(), report: syncReport });
+  notifyRenderer({ type: 'sync-done', time: new Date().toISOString(), report: syncReport, durationMs: syncDurationMs });
 }
 
 function startSyncScheduler() {
