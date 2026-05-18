@@ -30,12 +30,41 @@ const setInterval_    = document.getElementById('set-interval');
 const setUsername     = document.getElementById('set-username');
 const setPassword     = document.getElementById('set-password');
 const setSqlHost      = document.getElementById('set-sql-host');
+const setSqlPortLabel = document.getElementById('set-sql-port-label');
 const setSqlPort      = document.getElementById('set-sql-port');
 const setSqlDb        = document.getElementById('set-sql-db');
+const setSqlUserLabel = document.getElementById('set-sql-user-label');
 const setSqlUser      = document.getElementById('set-sql-user');
+const setSqlPassLabel = document.getElementById('set-sql-pass-label');
 const setSqlPass      = document.getElementById('set-sql-pass');
 const setSqlWinauth   = document.getElementById('set-sql-winauth');
+const setSqlWinDomainLabel = document.getElementById('set-win-domain-label');
+const setSqlWinDomain      = document.getElementById('set-win-domain');
+const setSqlWinUserLabel   = document.getElementById('set-win-user-label');
+const setSqlWinUser        = document.getElementById('set-win-user');
+const setSqlWinPassLabel   = document.getElementById('set-win-pass-label');
+const setSqlWinPass        = document.getElementById('set-win-pass');
 const btnSaveSettings = document.getElementById('btn-save-settings');
+
+function updateSqlFieldVisibility() {
+  const isWinAuth   = setSqlWinauth.checked;
+  const isNamedInst = setSqlHost.value.includes('\\');
+  const showPort    = !isWinAuth && !isNamedInst;
+
+  setSqlPortLabel.hidden = !showPort;
+  setSqlPort.hidden      = !showPort;
+  setSqlUserLabel.hidden = isWinAuth;
+  setSqlUser.hidden      = isWinAuth;
+  setSqlPassLabel.hidden = isWinAuth;
+  setSqlPass.hidden      = isWinAuth;
+
+  setSqlWinDomainLabel.hidden = !isWinAuth;
+  setSqlWinDomain.hidden      = !isWinAuth;
+  setSqlWinUserLabel.hidden   = !isWinAuth;
+  setSqlWinUser.hidden        = !isWinAuth;
+  setSqlWinPassLabel.hidden   = !isWinAuth;
+  setSqlWinPass.hidden        = !isWinAuth;
+}
 const btnCancelSettings = document.getElementById('btn-cancel-settings');
 const settingsMsg     = document.getElementById('settings-msg');
 
@@ -243,6 +272,9 @@ btnCancelSettings.addEventListener('click', () => {
   settingsPanel.hidden = true;
 });
 
+setSqlWinauth.addEventListener('change', updateSqlFieldVisibility);
+setSqlHost.addEventListener('input',    updateSqlFieldVisibility);
+
 btnSaveSettings.addEventListener('click', async () => {
   const data = {
     apiUrl:              setApiUrl.value.trim().replace(/\/$/, ''),
@@ -250,13 +282,18 @@ btnSaveSettings.addEventListener('click', async () => {
     syncIntervalMinutes: parseInt(setInterval_.value, 10) || 5,
     username:            setUsername.value.trim(),
     sqlHost:             setSqlHost.value.trim()  || 'localhost',
-    sqlPort:             parseInt(setSqlPort.value, 10) || 1433,
+    sqlPort:             setSqlHost.value.trim().includes('\\')
+                           ? null
+                           : (parseInt(setSqlPort.value, 10) || 1433),
     sqlDatabase:         setSqlDb.value.trim()   || 'dsnpharma',
     sqlUsername:         setSqlUser.value.trim(),
     sqlWindowsAuth:      setSqlWinauth.checked,
+    sqlWinDomain:        setSqlWinDomain.value.trim(),
+    sqlWinUser:          setSqlWinUser.value.trim(),
   };
-  if (setPassword.value) data.password    = setPassword.value;
-  if (setSqlPass.value)  data.sqlPassword = setSqlPass.value;
+  if (setPassword.value)   data.password       = setPassword.value;
+  if (setSqlPass.value)    data.sqlPassword    = setSqlPass.value;
+  if (setSqlWinPass.value) data.sqlWinPassword = setSqlWinPass.value;
 
   try {
     await window.api.saveConfig(data);
@@ -284,10 +321,13 @@ async function loadConfig() {
     setInterval_.value    = cfg.syncIntervalMinutes ?? 5;
     setUsername.value     = cfg.username            ?? '';
     setSqlHost.value      = cfg.sqlHost             ?? 'localhost';
-    setSqlPort.value      = cfg.sqlPort             ?? 1433;
+    setSqlPort.value      = (cfg.sqlPort != null) ? cfg.sqlPort : 1433;
     setSqlDb.value        = cfg.sqlDatabase         ?? 'dsnpharma';
     setSqlUser.value      = cfg.sqlUsername         ?? '';
     setSqlWinauth.checked = cfg.sqlWindowsAuth      ?? false;
+    setSqlWinDomain.value = cfg.sqlWinDomain        ?? '';
+    setSqlWinUser.value   = cfg.sqlWinUser          ?? '';
+    updateSqlFieldVisibility();
     autoSyncEnabled       = cfg.autoSync            ?? false;
     syncIntervalMinutes   = cfg.syncIntervalMinutes ?? 5;
     if (!autoSyncEnabled) {

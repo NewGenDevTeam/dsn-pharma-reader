@@ -72,19 +72,25 @@
         <label>API Password</label>
         <input id="set-password" type="password" placeholder="Leave blank to keep current" />
 
-        <span class="settings-section-label">SQL Server</span><span></span>
-        <label>Host</label>
-        <input id="set-sql-host" type="text" placeholder="localhost" />
-        <label>Port</label>
+        <span class="settings-section-label">SQL Server</span>
+        <label>Server</label>
+        <input id="set-sql-host" type="text" placeholder="localhost or DESKTOP-DRI80BM\A2006" />
+        <label id="set-sql-port-label">Port</label>
         <input id="set-sql-port" type="number" min="1" max="65535" placeholder="1433" />
         <label>Database</label>
         <input id="set-sql-db" type="text" placeholder="dsnpharma" />
-        <label>SQL Username</label>
+        <label id="set-sql-user-label">SQL Username</label>
         <input id="set-sql-user" type="text" placeholder="autocount_sync" />
-        <label>SQL Password</label>
+        <label id="set-sql-pass-label">SQL Password</label>
         <input id="set-sql-pass" type="password" placeholder="Leave blank to keep current" />
         <label>Windows Auth</label>
         <input id="set-sql-winauth" type="checkbox" style="width:auto;justify-self:start;margin-top:2px" />
+        <label id="set-win-domain-label">Domain</label>
+        <input id="set-win-domain" type="text" placeholder="Machine name e.g. DESKTOP-DR808M" />
+        <label id="set-win-user-label">Windows Username</label>
+        <input id="set-win-user" type="text" placeholder="YourWindowsUsername" />
+        <label id="set-win-pass-label">Windows Password</label>
+        <input id="set-win-pass" type="password" placeholder="Windows password" />
       </div>
       <div class="settings-actions">
         <button id="btn-save-settings" class="btn-primary btn-sm">Save</button>

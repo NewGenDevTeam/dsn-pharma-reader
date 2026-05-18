@@ -41,9 +41,11 @@ function hasValidToken() {
 // ── SQL Server connection ─────────────────────────────────────────────────────
 function getMssqlConfig() {
   const cfg = loadConfig();
+  const server = cfg.sqlHost || 'localhost';
+  const isNamedInstance = server.includes('\\');
+
   const base = {
-    server:   cfg.sqlHost     || 'localhost',
-    port:     parseInt(cfg.sqlPort, 10) || 1433,
+    server,
     database: cfg.sqlDatabase || 'dsnpharma',
     options: {
       trustServerCertificate: true,
@@ -53,8 +55,25 @@ function getMssqlConfig() {
       requestTimeout: 120000,
     },
   };
+
+  // Named instances must NOT have a fixed port — tedious discovers the
+  // actual port via SQL Server Browser (UDP 1434).
+  if (!isNamedInstance && cfg.sqlPort) {
+    base.port = parseInt(cfg.sqlPort, 10) || 1433;
+  }
+
   if (cfg.sqlWindowsAuth) {
-    return { ...base, authentication: { type: 'ntlm', options: { domain: '', userName: '', password: '' } } };
+    return {
+      ...base,
+      authentication: {
+        type: 'ntlm',
+        options: {
+          domain:   cfg.sqlWinDomain   || '',
+          userName: cfg.sqlWinUser     || '',
+          password: cfg.sqlWinPassword || '',
+        },
+      },
+    };
   }
   return { ...base, user: cfg.sqlUsername || '', password: cfg.sqlPassword || '' };
 }
@@ -138,7 +157,7 @@ async function fetchTableRows(tableName, columns, lastSync) {
 
     if (hasLastModified && lastSync) {
       query += ` WHERE LastModified > @lastSync`;
-      req.input('lastSync', sql.DateTime, new Date(lastSync));
+      req.input('lastSync', sql.DateTime2, new Date(lastSync));
     }
 
     const result = await req.query(query);
@@ -245,9 +264,10 @@ async function runSync() {
 
     const t0 = Date.now();
     try {
-      const columns  = colMap[entry.table] || [];
-      const lastSync = state[entry.table]?.lastSync ?? null;
-      const rows     = await fetchTableRows(entry.table, columns, lastSync);
+      const columns       = colMap[entry.table] || [];
+      const lastSync      = state[entry.table]?.lastSync ?? null;
+      const fetchStartTime = new Date().toISOString(); // capture before fetch — rows created during post won't be missed
+      const rows          = await fetchTableRows(entry.table, columns, lastSync);
 
       console.log(`[sync] ${entry.table} → ${entry.endpoint} | columns: ${columns.length} | rows fetched: ${rows.length}`);
 
@@ -335,7 +355,7 @@ async function runSync() {
         notifyRenderer({ type: 'table-skip', table: entry.table, reason: 'rate limited — sync stopped' });
       } else {
         syncReport.supported.push(entry.table);
-        state[entry.table] = { lastSync: new Date().toISOString(), rows: rows.length };
+        state[entry.table] = { lastSync: fetchStartTime, rows: rows.length };
         saveSyncState(state);
         notifyRenderer({ type: 'table-ok', table: entry.table, count: rows.length, ms: Date.now() - t0 });
       }
@@ -388,7 +408,7 @@ ipcMain.handle('sync:trigger', async () => {
 });
 
 ipcMain.handle('config:get', () => {
-  const { token, password, sqlPassword, ...safe } = loadConfig();
+  const { token, password, sqlPassword, sqlWinPassword, ...safe } = loadConfig();
   return { ...safe, hasToken: !!token, hasPassword: !!password, hasSqlPassword: !!sqlPassword };
 });
 
@@ -416,7 +436,7 @@ ipcMain.handle('auth:refresh', async () => {
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 760,
-    height: 640,
+    height: 650,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
